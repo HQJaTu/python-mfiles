@@ -11,7 +11,7 @@ Documentation: https://mfiles.readthedocs.io/en/latest/
 setup(
     name='mfiles',
     packages=find_packages(),
-    version='0.5.4',
+    version='0.6.0',
     license='MIT',
     description='M-Files API wrapper',
     long_description=PYPI_DESCRIPTION,
@@ -20,7 +20,7 @@ setup(
     url='https://github.com/afcmrp/python-mfiles',
     keywords=['M-Files', 'mfiles', 'REST', 'API'],
     install_requires=[
-        'requests',
+        'requests==2.33.0',
     ],
     classifiers=[
         'Development Status :: 3 - Alpha',
@@ -29,10 +29,11 @@ setup(
         'License :: OSI Approved :: MIT License',
         'Programming Language :: Python',
         'Programming Language :: Python :: 3',
-        'Programming Language :: Python :: 3.5',
-        'Programming Language :: Python :: 3.6',
-        'Programming Language :: Python :: 3.7',
-        'Programming Language :: Python :: 3.8',
+        'Programming Language :: Python :: 3.10',
+        'Programming Language :: Python :: 3.11',
+        'Programming Language :: Python :: 3.12',
+        'Programming Language :: Python :: 3.13',
+        'Programming Language :: Python :: 3.14',
         'Operating System :: OS Independent',
     ],
 )

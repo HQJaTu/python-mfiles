@@ -10,235 +10,362 @@ from getpass import getpass
 import json
 from os import getcwd, getenv
 from os.path import splitext
+from enum import Enum
 
 # External modules
 import requests
+from urllib.parse import urlsplit
+from http import HTTPStatus
+import logging
 
 # Internal modules
 from mfiles.definitions import DATATYPE, LOOKUP_DATATYPE, LOOKUP_DATATYPES, \
     OBJ, OBJ_PROPERTY
-from mfiles.errors import MFilesException
+from mfiles.errors import MFilesClientException, MFilesServerException
 
 # M-files server info
 DEFAULT_URL = "http://localhost/m-files/REST/"
 
-class MFilesClient():
-    """M-Files client.
+log = logging.getLogger(__name__)
 
-    Parameters:
-        server (str): API URL. Defaults to ``"http://localhost/m-files/REST/"``
-        user (str): User to login with. If not supplied it will be fetched
-                    from environment variable ``MFILES_USER``, if not set
-                    it will be fetched using ``input()``.
-        password (str): User password. If not supplied it will be
-                        fetched from environment variable ``MFILES_PASS``,
-                        if not set it will be fetched using ``getpass()``.
-        vault (str): M-Files vault GUID to connect to.
+
+class MFilesClient():
     """
+    M-Files REST API client.
+    """
+
     # pylint: disable=too-many-public-methods
 
-    def __init__(self, server=DEFAULT_URL, user=None, password=None, vault=None):
+    class TokenType(Enum):
+        SERVER = 1
+        VAULT = 2
+
+    def __init__(self, server: str = DEFAULT_URL, user: str = None, password: str = None, vault: str = None):
+        """
+        Constructor for M-Files client.
+        :param server: API URL. Defaults to ``"http://localhost/m-files/REST/"``
+        :param user: User to login with. If not supplied it will be fetched
+                    from environment variable ``MFILES_USER``, if not set
+                    it will be fetched using ``input()``.
+        :param password: User password. If not supplied it will be
+                        fetched from environment variable ``MFILES_PASS``,
+                        if not set it will be fetched using ``getpass()``.
+        :param vault: M-Files vault GUID to connect to.
+        """
+        self._server = None
+        self._user = None
+        self._password = None
+        self._vault = None
+        self._server_token = None
+        self._vault_token = None
         self.user = user
         self.password = password
         self.vault = vault
-        self.server = ""
-        self.headers = {"X-Authentication": ""}
-        # need before set_server
         self.session = requests.Session()
-        self.set_server(server)
-
-    def set_server(self, server):
-        """Set the M-Files server API URL."""
-        if server[-1] != "/":
-            server += "/"
         self.server = server
-        self.login()
 
-    def set_user(self, user):
-        """Set the M-Files user."""
-        self.user = user
-        self.login()
+    @property
+    def server(self) -> str:
+        return self._server
 
-    def set_password(self, password):
-        """Set the M-Files user password."""
-        self.password = password
-        self.login()
-
-    def set_vault(self, vault):
-        """Set the M-Files vault GUID to connect to."""
-        self.vault = vault
-        self.login()
-
-    def login(self, server=None, user=None, password=None, vault=None):
-        """Logs in the user to M-Files.
-
-        Logs in and prepares the authentication token, ready to be used in
-        http request header as authentication.
-
-        Parameters:
-            server (str): API URL.
-            user (str): User to login with. If not supplied it will be fetched
-                        from environment variable ``MFILES_USER``, if not set
-                        it will be fetched using ``input()``.
-            password (str): User password. If not supplied it will be
-                            fetched from environment variable ``MFILES_PASS``,
-                            if not set it will be fetched using ``getpass()``.
-            vault (str): M-Files vault GUID to connect to.
+    @server.setter
+    def server(self, server: str) -> None:
+        """
+        Set the M-Files server API URL.
+        Typical format for API URL is: https://vault-hostname.example.com/REST/
+        :param server: API URL.
+            If not supplied it will be fetched from environment variable MFILES_URL
         """
         env_server = getenv("MFILES_URL")
-        env_user = getenv("MFILES_USER")
-        env_pass = getenv("MFILES_PASS")
-        env_vault = getenv("MFILES_VAULT")
-        programmatic_user = user or self.user or env_user
-        programmatic_pass = password or self.password or env_pass
-        self.server = server or self.server or env_server
-        self.user = programmatic_user or input("M-Files mail: ")
-        self.password = programmatic_pass or getpass("M-Files password: ")
-        self.vault = vault or self.vault or env_vault
-        if not all([self.server, self.user, self.password, self.vault]):
-            return
-        auth = json.dumps({"Username": self.user,
-                           "Password": self.password,
-                           "VaultGuid": self.vault})
-        request_url = self.server + "server/authenticationtokens"
-        response = self.session.post(request_url, data=auth)
-        auth_token = json.loads(response.text)["Value"]
-        self.headers = {"X-Authentication": auth_token}
+        self._server = server or env_server
 
-    def get(self, endpoint):
-        """General purpose GET method.
+        parts = urlsplit(self.server)
+        if parts.fragment or parts.query:
+            raise MFilesClientException(f"M-Files REST API URL '{self.server}' can not contain query or fragment!")
 
-        Parameters:
-            endpoint (str): Endpoint on form ``"path/to/endpoint"``.
+        if parts.path[-1] != "/":
+            self.server += "/"
 
-        Raises:
-            MFilesException: If request returns status code != 200.
+        if "REST" not in self.server:
+            log.warning(f"Typical M-Files REST API URLs have /REST/ in them.")
 
-        Returns:
-            dict: Dictionary with request result.
+    @property
+    def user(self) -> str:
+        return self._user
+
+    @user.setter
+    def user(self, user: str) -> None:
         """
+        Set the M-Files user.
+        :param user: User to login with.
+            If not supplied it will be fetched from environment variable MFILES_USER
+        """
+        env_user = getenv("MFILES_USER")
+        programmatic_user = user or env_user
+        self._user = programmatic_user or input("M-Files mail: ")
+
+    @property
+    def password(self) -> str:
+        return self._password
+
+    @password.setter
+    def password(self, password: str) -> None:
+        """
+        Set the M-Files user password.
+        :param password: User password.
+            If not supplied it will be fetched from environment variable MFILES_PASS
+        """
+        env_pass = getenv("MFILES_PASS")
+        programmatic_pass = password or env_pass
+        self._password = programmatic_pass or getpass("M-Files password: ")
+
+    @property
+    def vault(self) -> str:
+        return self._vault
+
+    @vault.setter
+    def vault(self, vault: str) -> None:
+        """
+        Set the M-Files vault GUID to connect to.
+        :param vault: M-Files vault GUID to connect to.
+            If not supplied it will be fetched from environment variable MFILES_VAULT
+        :returns: MFilesClient object.
+        """
+        env_vault = getenv("MFILES_VAULT")
+        self._vault = vault or env_vault
+
+    @property
+    def server_token(self):
+        return self._server_token
+
+    @server_token.setter
+    def server_token(self, token: str) -> None:
+        self._server_token = token
+        self.session.headers = {"X-Authentication": self._server_token}
+
+    @property
+    def vault_token(self):
+        return self._vault_token
+
+    @vault_token.setter
+    def vault_token(self, token: str) -> None:
+        self._vault_token = token
+        self.session.headers = {"X-Authentication": self._vault_token}
+
+    def login(self) -> MFilesClient:
+        """
+        Logs in and prepares the authentication token, ready to be used in
+        HTTP request header as authentication.
+        """
+        auth_payload = json.dumps(
+            {
+                "Username": self.user,
+                "Password": self.password,
+                "VaultGuid": self.vault
+            }
+        )
+        request_url = self.server + "server/authenticationtokens"
+        response = self.session.post(request_url, data=auth_payload)
+        response.raise_for_status()
+        response_json = json.loads(response.text)
+        if "Value" not in response_json:
+            raise MFilesServerException("M-Files authentication failed!")
+
+        if self.vault is not None:
+            self.vault_token = response_json["Value"]
+
+            return self
+
+        # No vault was specified.
+        # Go get a list of vaults and use the first available one
+        self.server_token = response_json["Value"]
+        vaults = self.get('server/vaults', token_type=self.TokenType.SERVER)
+        if vaults is None or len(vaults) == 0:
+            raise MFilesServerException("M-Files authentication succeeded, but you don't have access to any vaults!")
+        vault = vaults[0]
+        if "Authentication" not in vault:
+            raise MFilesServerException("M-Files authentication failed! Invalid vault listing response received.")
+        self.vault_token = vault['Authentication']
+
+        return self
+
+    def _headers(self, token_type: Optional[TokenType] = None) -> dict:
+        headers = {}
+
+        if token_type is not None:
+            if token_type == self.TokenType.SERVER:
+                if self.server_token is None:
+                    raise MFilesClientException("There is no server token to be used!")
+                headers["X-Authentication"] = str(self.server_token)
+            elif token_type == self.TokenType.VAULT:
+                if self.vault_token is None:
+                    raise MFilesClientException("There is no vault token to be used!")
+                headers["X-Authentication"] = str(self.vault_token)
+
+            return headers
+
+        if self.vault is None:
+            if self.server_token is not None:
+                headers["X-Authentication"] = str(self.server_token)
+        else:
+            if self.vault_token is not None:
+                headers["X-Authentication"] = str(self.vault_token)
+
+        return headers
+
+    def get(self, endpoint: str, token_type: TokenType = TokenType.VAULT) -> dict:
+        """
+        General purpose GET method.
+
+        :param endpoint: Endpoint on form ``"path/to/endpoint"``.
+        :return dict: Dictionary with request result.
+        :raise MFilesServerException: If request returns status code != 200.
+        """
+
+        # Sanity:
         if endpoint[0] == "/":
-            endpoint = endpoint[1:]
+            raise MFilesClientException("Endpoint can not start with a / !")
+        if token_type == self.TokenType.SERVER and self.server_token is None:
+            log.warning("No server authentication token provided. Attempt logging in.")
+            self.login()
+        if token_type == self.TokenType.VAULT and self.vault_token is None:
+            if self.vault is None:
+                raise MFilesClientException("There is no vault defined! Cannot get vault token for it.")
+            log.warning("No vault authentication token provided. Attempt logging in.")
+            self.login()
+
+        # Go for a GET-request
         request_url = self.server + endpoint
-        response = self.session.get(request_url, headers=self.headers)
-        if response.status_code != 200:
-            raise MFilesException(response.text)
+        response = self.session.get(request_url, headers=self._headers(token_type))
+        if response.status_code != HTTPStatus.OK:
+            raise MFilesServerException(response.text)
         return response.json()
 
-    def put(self, endpoint, data=None):
-        """General purpose PUT method.
-
-        Parameters:
-            endpoint (str): Endpoint on form ``"path/to/endpoint"``.
-            data (str): Data to use in PUT request.
-
-        Raises:
-            MFilesException: If request returns status code != 200.
-
-        Returns:
-            dict: Dictionary with request result.
+    def put(self, endpoint: str, data=None) -> dict:
         """
+        General purpose PUT method.
+
+        :param endpoint: Endpoint on form ``"path/to/endpoint"``.
+        :param data (str): Data to use in PUT request.
+        :return dict: Dictionary with request result.
+        :raise MFilesServerException: If request returns status code != 200.
+        """
+
+        # Sanity:
         if endpoint[0] == "/":
-            endpoint = endpoint[1:]
+            raise MFilesClientException("Endpoint can not start with a / !")
+        if self.token is None:
+            log.warning("No authentication token provided. Attempt logging in.")
+            self.login()
+
+        # Go for a PUT-request
         request_url = self.server + endpoint + "?_method=PUT"
-        response = self.session.post(request_url, headers=self.headers, data=data)
-        if response.status_code != 200:
-            raise MFilesException(response.text)
+        response = self.session.post(request_url, data=data, headers=self._headers())
+        if response.status_code != HTTPStatus.OK:
+            raise MFilesServerException(response.text)
         return response.json()
 
     def post(self, endpoint, data=None):
-        """General purpose POST method.
-
-        Parameters:
-            endpoint (str): Endpoint on form ``"path/to/endpoint"``.
-            data (str): Data to use in POST request.
-
-        Raises:
-            MFilesException: If request returns status code != 200.
-
-        Returns:
-            dict: Dictionary with request result.
         """
+        General purpose POST method.
+
+        :param endpoint: Endpoint on form ``"path/to/endpoint"``.
+        :param data (str): Data to use in POST request.
+        :return dict: Dictionary with request result.
+        :raise MFilesServerException: If request returns status code != 200.
+        """
+
+        # Sanity:
         if endpoint[0] == "/":
-            endpoint = endpoint[1:]
+            raise MFilesClientException("Endpoint can not start with a / !")
+        if self.token is None:
+            log.warning("No authentication token provided. Attempt logging in.")
+            self.login()
+
+        # Go for a PUT-request
         request_url = self.server + endpoint
-        response = self.session.post(request_url, headers=self.headers, data=data)
-        if response.status_code != 200:
-            raise MFilesException(response.text)
+        response = self.session.post(request_url, data=data, headers=self._headers())
+        if response.status_code != HTTPStatus.OK:
+            raise MFilesServerException(response.text)
         return response.json()
 
-    def quick_search(self, query):
-        """Perform a quick search in the M-Files vault.
+    def quick_search(self, query: str) -> list:
+        """
+        Perform a quick search in the M-Files vault.
 
         This returns the same results as if the query was
         performed against the M-Files client search box.
 
-        Parameters:
-            query (str): Search query.
-
-        Returns:
-            list: A list of matching items.
+        :param query: Search query.
+        :return list: A list of matching items.
         """
         search_query = "objects?q=" + query
         return self.get(search_query)
 
     def search(self, query):
-        """Perform a search in the M-Files vault.
+        """
+        Perform a search in the M-Files vault.
 
-        Parameters:
-            query (str): Search query.
-
-        Returns:
-            list: A list of matching items.
+        :param query: Search query.
+        :return list: A list of matching items.
         """
         search_query = "objects?" + query
         return self.get(search_query)
 
-    def objects(self):
-        """Get all object types in the M-Files vault."""
+    def objects(self) -> list:
+        """
+        Get all object types in the M-Files vault.
+        """
         response = self.get("structure/objecttypes")
         return response
 
-    def classes(self):
-        """Get all classes in the M-Files vault."""
+    def classes(self) -> list:
+        """
+        Get all classes in the M-Files vault.
+        """
         response = self.get("structure/classes")
         return response
 
-    def properties(self):
-        """Get all property definitions in the M-Files vault."""
+    def properties(self) -> list:
+        """
+        Get all property definitions in the M-Files vault.
+        """
         response = self.get("structure/properties")
         return response
 
-    def class_details(self, class_id):
-        """Get details for a specific class in the M-Files vault."""
-        endpoint = "structure/classes/%d" % class_id
+    def class_details(self, class_id: int) -> dict:
+        """
+        Get details for a specific class in the M-Files vault.
+        """
+        endpoint = "structure/classes/{}".format(class_id)
         response = self.get(endpoint)
         return response
 
-    def value_lists(self):
-        """Get all value lists in the M-Files vault."""
+    def value_lists(self) -> list:
+        """
+        Get all value lists in the M-Files vault.
+        """
         response = self.get("valuelists")
         return response
 
-    def value_list_items(self, list_id):
-        """Get items for a specific value list in the M-Files vault."""
-        endpoint = "valuelists/%d/items" % list_id
+    def value_list_items(self, list_id: int) -> dict:
+        """
+        Get items for a specific value list in the M-Files vault.
+        """
+        endpoint = "valuelists/{}/items".format(list_id)
         response = self.get(endpoint)
         return response
 
-    def get_value_id(self, value_name, list_id, owner_ids):
-        """Get the ID of a specific value in a specific value list.
+    def get_value_id(self, value_name: str, list_id: int, owner_ids: list) -> int:
+        """
+        Get the ID of a specific value in a specific value list.
 
-        Parameters:
-            value_name (str): Name of the value list option to look for.
-            list_id (int): ID of the list to look in.
-            owner_ids (list): IDs of potential list owners.
-
-        Raises:
-            MFilesException: If the value name can't be found in the list.
-
-        Returns:
-            int: ID of value in value list.
+        :param: value_name: Name of the value list option to look for.
+        :param: list_id: ID of the list to look in.
+        :param: owner_ids: IDs of potential list owners.
+        :return dict: ID of value in value list.
+        :rtype int
+        :raise MFilesClientException: If the value name can't be found in the list.
         """
         list_items = self.value_list_items(list_id)
         for item in list_items["Items"]:
@@ -246,21 +373,19 @@ class MFilesClient():
             ok_owner = not item["HasOwner"] or item["OwnerID"] in owner_ids
             if same_name and ok_owner:
                 return item["ID"]
-        raise MFilesException("Value name %s not recognized" % value_name)
 
-    def get_types(self, category="object"):
-        """Get info for all types from a type category.
+        raise MFilesClientException("Value name '{}' not recognized".format(value_name))
 
-        Parameters:
-            category (str): Type category. Can be any of ``"object"``,
+    def get_types(self, category: str = "object") -> list:
+        """
+        Get info for all types from a type category.
+
+        :param: category: Type category. Can be any of ``"object"``,
                             ``"class"``, ``"property"``. Defaults to
                             ``"object"``.
-
-        Raises:
-            MFilesException: If the category supplied doesn't exist.
-
-        Returns:
-            list: List of dicts with information about the types.
+        :return List of dicts with information about the types.
+        :rtype list
+        :raise MFilesClientException: If the category supplied doesn't exist.
         """
         if category == "object":
             types = self.objects()
@@ -269,11 +394,12 @@ class MFilesClient():
         elif category == "property":
             types = self.properties()
         else:
-            raise MFilesException("Type name %s not recognized" % category)
+            raise MFilesClientException("Type name {} not recognized".format(category))
         return types
 
     def get_info(self, name, category="object"):
-        """Get general info of a type by name.
+        """
+        Get general info of a type by name.
 
         Parameters:
             name (str): Name of type to get info from.
@@ -291,10 +417,11 @@ class MFilesClient():
         for type_info in types:
             if type_info["Name"] == name:
                 return type_info
-        raise MFilesException("Property %s could not be found in vault" % name)
+        raise MFilesClientException("Property '{}' could not be found in vault".format(name))
 
     def get_info_id(self, type_id, category="object"):
-        """Get general info of a type by id.
+        """
+        Get general info of a type by id.
 
         Parameters:
             type_id (str): ID of type to get info from.
@@ -312,11 +439,11 @@ class MFilesClient():
         for type_info in types:
             if type_info["ID"] == type_id:
                 return type_info
-        raise MFilesException("Property ID %s could not be found in vault" % \
-                              type_id)
+        raise MFilesClientException("Property ID {} could not be found in vault".format(type_id))
 
     def translate_name(self, name, category="object"):
-        """Translate a name into its ID as recognized by the server.
+        """
+        Translate a name into its ID as recognized by the server.
 
         Parameters:
             name (str): Name to translate.
@@ -330,7 +457,8 @@ class MFilesClient():
         return self.get_info(name, category)["ID"]
 
     def get_property(self, property_name, owners, property_value):
-        """Get a certain property built as M-Files expects it.
+        """
+        Get a certain property built as M-Files expects it.
 
         Parameters:
             property_name (str): Property name.
@@ -359,7 +487,8 @@ class MFilesClient():
 
     def create_object(self, name, object_type=0, object_class=0,
                       extra_info=None, file_info=None):
-        """Create M-Files object and upload it to the vault.
+        """
+        Create M-Files object and upload it to the vault.
 
         Parameters:
             name (str): Name of new object.
@@ -401,26 +530,29 @@ class MFilesClient():
             obj["PropertyValues"].append(prop)
         obj["Files"] = [file_info]
         data = json.dumps(obj)
-        endpoint = "objects/%s" % object_type
+        endpoint = "objects/{}".format(object_type)
         return self.post(endpoint, data)
 
     def check_out(self, object_id, object_version="latest", object_type=0):
-        """Check out an object from M-Files."""
-        data = json.dumps({"Value": "2"}) # Checked out by me
-        endpoint = "objects/%s/%s/%s/checkedout" % \
-            (object_type, object_id, object_version)
+        """
+        Check out an object from M-Files.
+        """
+        data = json.dumps({"Value": "2"})  # Checked out by me
+        endpoint = "objects/{}/{}/{}/checkedout".format(object_type, object_id, object_version)
         return self.put(endpoint, data)
 
     def check_in(self, object_id, object_version="latest", object_type=0):
-        """Check in an object to M-Files."""
-        data = json.dumps({"Value": "0"}) # Checked in
-        endpoint = "objects/%s/%s/%s/checkedout" % \
-            (object_type, object_id, object_version)
+        """
+        Check in an object to M-Files.
+        """
+        data = json.dumps({"Value": "0"})  # Checked in
+        endpoint = "objects/{}/{}/{}/checkedout".format(object_type, object_id, object_version)
         return self.put(endpoint, data)
 
     def upload_file(self, file_path, object_type=0, object_class=0,
                     extra_info=None):
-        """Upload a file to M-Files.
+        """
+        Upload a file to M-Files.
 
         Parameters:
             file_path (str): Path to file to upload.
@@ -458,36 +590,32 @@ class MFilesClient():
                                       extra_info, file_info)
         return obj_info
 
-    def download_file(self, local_path, object_type, object_id, file_id,
-                      object_version="latest"):
-        """Download a file from M-Files.
+    def download_file(self, local_path: str, object_type: str, object_id: int, file_id: int,
+                      object_version: Optional[str | int] = "latest"):
+        """
+        Download a file from M-Files.
 
-        Parameters:
-            object_type (int): Object type ID.
-            object_id (int): Object ID.
-            file_id (int): File ID.
-            object_version (int, str): Object version. Defaults to
-                                       ``"latest"``.
-            local_path (str): Path to download file to.
-
-        Raises:
-            MFilesException: If the file can't be downloaded.
-
-        Returns:
-            bool: True if file is found and downloaded successfully.
+        :param object_type (int): Object type ID.
+        :param object_id (int): Object ID.
+        :param file_id (int): File ID.
+        :param object_version (int, str): Object version. Defaults to
+        :returns True if file is found and downloaded successfully.
+        :rtype: bool
+        :raises MFilesServerException: If the file can't be downloaded.
         """
         # pylint: disable=too-many-arguments,too-many-positional-arguments
-        request_url = "%sobjects/%s/%s/%s/files/%s/content" % \
-            (self.server, object_type, object_id, object_version, file_id)
-        response = self.session.get(request_url, headers=self.headers)
-        if response.status_code != 200:
-            raise MFilesException(response.text)
+        request_url = "{}objects/{}/{}/{}/files/{}/content".format(self.server, object_type, object_id, object_version,
+                                                                   file_id)
+        response = self.session.get(request_url)
+        if response.status_code != HTTPStatus.OK:
+            raise MFilesServerException(response.text)
         with open(local_path, mode="wb+") as file_stream:
             file_stream.write(response.content)
         return True
 
-    def download_file_name(self, file_name, local_path=None):
-        """Download a file from M-Files by its name.
+    def download_file_name(self, file_name: str, local_path: str = None):
+        """
+        Download a file from M-Files by its name.
 
         Caution:
             This searches for the file and downloads the top
@@ -520,27 +648,29 @@ class MFilesClient():
                                          object_version=obj_version)
         return download_ok
 
-    def delete_object(self, object_type, object_id):
-        """Delete M-Files object.
+    def delete_object(self, object_type: str, object_id: int) -> dict:
+        """
+        Delete M-Files object.
 
         Note:
             Deleting an object means flagging an object for deletion.
             Most users will not see the object anymore, but administators
             will still be able to access it.
         """
-        endpoint = "objects/%s/%s/deleted" % (object_type, object_id)
+        endpoint = "objects/{}/{}/deleted".format(object_type, object_id)
         return self.put(endpoint)
 
-    def destroy_object(self, object_type, object_id):
-        """Destroy M-Files object.
+    def destroy_object(self, object_type: str, object_id: int) -> dict:
+        """
+        Destroy M-Files object.
 
         Caution:
             Destroying an object means unrecoverably deleting all
             versions of the object. Use with caution.
         """
-        request_url = "%sobjects/%s/%s/latest?allVersions=true" % \
-            (self.server, object_type, object_id)
-        response = self.session.delete(request_url, headers=self.headers)
-        if response.status_code != 200:
-            raise MFilesException(response.text)
+        request_url = "{}objects/{}/{}/latest?allVersions=true".format(self.server, object_type, object_id)
+        response = self.session.delete(request_url)
+        if response.status_code != HTTPStatus.OK:
+            raise MFilesServerException(response.text)
+
         return response
