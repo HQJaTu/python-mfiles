@@ -12,5 +12,6 @@ M-Files property IDs for all object types are abstracted, so you can upload a
 correct IDs will be fetched from the server.
 """
 
+from mfiles.base_client import MFilesClientBase
 from mfiles.client import MFilesClient
 from mfiles.errors import MFilesException
