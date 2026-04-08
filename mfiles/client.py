@@ -2,7 +2,7 @@
 import json
 import logging
 from copy import deepcopy
-
+from enum import Enum
 # External modules
 from http import HTTPStatus
 from os import getcwd
@@ -30,6 +30,11 @@ class MFilesClient(MFilesClientBase):
 
     # pylint: disable=too-many-public-methods
 
+    class CategoryType(Enum):
+        OBJECT_TYPE = 1
+        CLASS_TYPE = 2
+        PROPERTY_TYPE = 2
+
     def __init__(self, server: str = DEFAULT_URL, user: str = None, password: str = None, vault: str = None):
         """
         Constructor for M-Files client.
@@ -42,7 +47,9 @@ class MFilesClient(MFilesClientBase):
                         if not set it will be fetched using ``getpass()``.
         :param: vault: M-Files vault GUID to connect to.
         """
+        log.warning("In init, before parent init!")
         MFilesClientBase.__init__(self, server, user, password, vault)
+        log.info("MFiles client initialized")
 
     def quick_search(self, query: str) -> dict:
         """
@@ -57,7 +64,7 @@ class MFilesClient(MFilesClientBase):
         search_query = "objects?q=" + query
         return self.get(search_query)
 
-    def search(self, query):
+    def search(self, query) -> dict:
         """
         Perform a search in the M-Files vault.
 
@@ -70,7 +77,7 @@ class MFilesClient(MFilesClientBase):
     def objects(self) -> list:
         """
         Get all object types in the M-Files vault.
-        :returns: list: A list of matching items.
+        :returns: list: A list of object types in a vault.
         """
         response = self.get("structure/objecttypes")
         return response
@@ -138,7 +145,7 @@ class MFilesClient(MFilesClientBase):
 
         raise MFilesClientException("Value name '{}' not recognized".format(value_name))
 
-    def get_types(self, category: str = "object") -> list:
+    def get_types(self, category: CategoryType = CategoryType.OBJECT_TYPE) -> list:
         """
         Get info for all types from a type category.
 
@@ -149,17 +156,17 @@ class MFilesClient(MFilesClientBase):
         :rtype list
         :raises MFilesClientException: If the category supplied doesn't exist.
         """
-        if category == "object":
+        if category == self.CategoryType.OBJECT_TYPE:
             types = self.objects()
-        elif category == "class":
+        elif category == self.CategoryType.CLASS_TYPE:
             types = self.classes()
-        elif category == "property":
+        elif category == self.CategoryType.PROPERTY_TYPE:
             types = self.properties()
         else:
             raise MFilesClientException("Type name {} not recognized".format(category))
         return types
 
-    def get_info(self, name: str, category: str = "object") -> dict:
+    def get_info(self, name: str, category: CategoryType = CategoryType.OBJECT_TYPE) -> dict:
         """
         Get general info of a type by name.
 
@@ -173,9 +180,10 @@ class MFilesClient(MFilesClientBase):
         for type_info in types:
             if type_info["Name"] == name:
                 return type_info
-        raise MFilesClientException("Property '{}' could not be found in vault".format(name))
+        raise MFilesClientException("{} '{}' could not be found in vault".format(category, name))
 
-    def get_info_id(self, type_id: str, category: str = "object") -> dict:
+    def get_info_id(self, type_id: str,
+                    category: CategoryType = CategoryType.OBJECT_TYPE) -> dict:
         """
         Get general info of a type by id.
 
@@ -191,7 +199,8 @@ class MFilesClient(MFilesClientBase):
                 return type_info
         raise MFilesClientException("Property ID {} could not be found in vault".format(type_id))
 
-    def translate_name(self, name: str, category: str = "object") -> str:
+    def translate_name(self, name: str,
+                       category: CategoryType = CategoryType.OBJECT_TYPE) -> str:
         """
         Translate a name into its ID as recognized by the server.
 
@@ -202,14 +211,13 @@ class MFilesClient(MFilesClientBase):
         """
         return self.get_info(name, category)["ID"]
 
-    def get_property(self, property_name, owners, property_value):
+    def get_property(self, property_name: str, owners: list, property_value) -> str:
         """
         Get a certain property built as M-Files expects it.
 
-        Parameters:
-            property_name (str): Property name.
-            owners (list): List of ints with possible owners IDs.
-            property_value (any): Value to set property to.
+        :param: property_name: Name of property to get.
+        :param: owners: Owners of property.
+        :param: property_value: Value of property.
 
         Return:
             dict: Property with required keys and values.
@@ -229,34 +237,28 @@ class MFilesClient(MFilesClientBase):
             datatype = deepcopy(DATATYPE)
             datatype["Value"] = property_value
         prop["TypedValue"].update(datatype)
+
         return prop
 
-    def create_object(self, name, object_type=0, object_class=0,
-                      extra_info=None, file_info=None):
+    def create_object(self, name: str, object_type: str | int = 0, object_class: str | int = 0,
+                      extra_info: Optional[dict] = None, file_info: Optional[list] = None) -> dict:
         """
         Create M-Files object and upload it to the vault.
 
-        Parameters:
-            name (str): Name of new object.
-            object_type (str, int): Object type. If integer, the type will
-                                    not be attempted to be translated. If
-                                    string, the type will be transated into
-                                    the property ID the server expects for the
+        :param: name: Name of object to create.
+        :param: object_type: Object type. If integer, the type will not be attempted to be translated. If
+                                    string, the type will be transated into the property ID the server expects for the
                                     given type.
-            object_class (str, int): Object class, same translation principle
-                                     as for object_type.
-            extra_info (dict): Additional object information.
-            file_info (dict): Eventual file information for object. Dict
+        :param: object_class: Object class, same translation principle as for object_type.
+        :param: extra_info: Additional object information.
+        :param: file_info: Eventual file information for object. Dict
                               that must contain keys ``UploadID``, ``Title``,
                               ``Extension``, ``Size``.
-
-        Raises:
-            MFilesException: If the object can't be created.
-
-        Returns:
-            dict: Dictionary with object information.
+        :returns: dict: Dictionary with information about the object.
+        :raises MFilesClientException: If the object can't be created.
         """
         # pylint: disable=too-many-arguments,too-many-positional-arguments
+
         extra_info = extra_info or {}
         file_info = file_info or []
         if isinstance(object_type, str):
@@ -268,8 +270,9 @@ class MFilesClient(MFilesClientBase):
         # Set mandatory info
         obj["PropertyValues"][0]["TypedValue"]["Value"] = name
         obj["PropertyValues"][1]["TypedValue"]["Lookup"]["Item"] = object_class
+
         # Add any additionally supplied properties
-        for property_name in extra_info:
+        for property_name in extra_info.keys():
             owners = [object_class, object_type]
             prop = self.get_property(property_name, owners,
                                      extra_info[property_name])
@@ -279,24 +282,34 @@ class MFilesClient(MFilesClientBase):
         endpoint = "objects/{}".format(object_type)
         return self.post(endpoint, data)
 
-    def check_out(self, object_id, object_version="latest", object_type=0):
+    def check_out(self, object_id: int, object_version: str | int = "latest", object_type: str | int = 0) -> dict:
         """
         Check out an object from M-Files.
+
+        :param: object_id: Object ID.
+        :param: object_version: Version of object to check.
+        :param: object_type: Type of object to check.
+        :return: Dictionary with API request result.
         """
         data = json.dumps({"Value": "2"})  # Checked out by me
         endpoint = "objects/{}/{}/{}/checkedout".format(object_type, object_id, object_version)
         return self.put(endpoint, data)
 
-    def check_in(self, object_id, object_version="latest", object_type=0):
+    def check_in(self, object_id: int, object_version: str | int = "latest", object_type: str | int = 0) -> dict:
         """
         Check in an object to M-Files.
+
+        :param: object_id: Object ID.
+        :param: object_version: Version of object to check.
+        :param: object_type: Type of object to check.
+        :return: Dictionary with API request result.
         """
         data = json.dumps({"Value": "0"})  # Checked in
         endpoint = "objects/{}/{}/{}/checkedout".format(object_type, object_id, object_version)
         return self.put(endpoint, data)
 
-    def upload_file(self, file_path, object_type=0, object_class=0,
-                    extra_info=None):
+    def upload_file(self, file_path: str, object_type: str | int = 0, object_class=0,
+                    extra_info=None) -> dict:
         """
         Upload a file to M-Files.
 
@@ -306,7 +319,7 @@ class MFilesClient(MFilesClientBase):
         If str, the type will be translated into the property ID the server expects for the given type.
         :param: object_class: Object class, same translation principle as for object_type.
         :param: extra_info: Additional object information.
-        :returns: Dictionary with API request result.
+        :returns: Dictionary with create object API request result.
         :raises MFilesException: If the file can't be uploaded.
         """
         # Upload file to temporary storage
@@ -328,8 +341,8 @@ class MFilesClient(MFilesClientBase):
                                       extra_info, file_info)
         return obj_info
 
-    def download_file(self, local_path: str, object_type: str, object_id: int, file_id: int,
-                      object_version: Optional[str | int] = "latest"):
+    def download_file(self, local_path: str, object_type: str | int, object_id: int, file_id: int,
+                      object_version: str | int = "latest") -> bool:
         """
         Download a file from M-Files.
 
@@ -343,7 +356,7 @@ class MFilesClient(MFilesClientBase):
         """
         # pylint: disable=too-many-arguments,too-many-positional-arguments
         request_url = "objects/{}/{}/{}/files/{}/content".format(object_type, object_id, object_version,
-                                                                   file_id)
+                                                                 file_id)
         response = self.session.get(request_url)
         if response.status_code != HTTPStatus.OK:
             raise MFilesServerException(response.text)
@@ -351,7 +364,7 @@ class MFilesClient(MFilesClientBase):
             file_stream.write(response.content)
         return True
 
-    def download_file_name(self, file_name: str, local_path: str = None):
+    def download_file_name(self, file_name: str, local_path: str = None) -> bool:
         """
         Download a file from M-Files by its name.
 
@@ -363,13 +376,10 @@ class MFilesClient(MFilesClientBase):
             ``download_file()`` to download the file by using
             file and object id.
 
-        Parameters:
-            file_name (str): Name of file to download.
-            local_path (str): Path to download file to. Defaults
-                            to file name and current directory.
-
-        Returns:
-            bool: True if file is found and downloaded.
+        :param: file_name (str): File name.
+        :param: local_path (str, optional): Local path to download the file.
+        :returns: True if file is found and downloaded successfully.
+        :rtype: bool
         """
         items = self.quick_search(file_name)
         if not items:
@@ -386,7 +396,7 @@ class MFilesClient(MFilesClientBase):
                                          object_version=obj_version)
         return download_ok
 
-    def delete_object(self, object_type: str, object_id: int) -> dict:
+    def delete_object(self, object_type: str | int, object_id: int) -> dict:
         """
         Delete M-Files object.
 
@@ -394,17 +404,23 @@ class MFilesClient(MFilesClientBase):
             Deleting an object means flagging an object for deletion.
             Most users will not see the object anymore, but administators
             will still be able to access it.
+
+        :param: object_type (int): Object type ID.
+        :param: object_id (int): Object ID.
         """
         endpoint = "objects/{}/{}/deleted".format(object_type, object_id)
         return self.put(endpoint)
 
-    def destroy_object(self, object_type: str, object_id: int) -> dict:
+    def destroy_object(self, object_type: str | int, object_id: int) -> dict:
         """
         Destroy M-Files object.
 
         Caution:
             Destroying an object means unrecoverably deleting all
             versions of the object. Use with caution.
+
+        :param: object_type (int): Object type ID.
+        :param: object_id (int): Object ID.
         """
         request_url = "objects/{}/{}/latest?allVersions=true".format(object_type, object_id)
         response = self.session.delete(request_url)

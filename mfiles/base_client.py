@@ -1,16 +1,17 @@
 # Standard modules
-from getpass import getpass
 import json
-from os import getenv
+import logging
+from datetime import datetime, timezone
 from enum import Enum
+from getpass import getpass
+from http import HTTPStatus
+from os import getenv, getlogin
 from typing import Optional
+from urllib.parse import urlsplit
 
+import keyring
 # External modules
 import requests
-from urllib.parse import urlsplit
-from http import HTTPStatus
-import logging
-
 # Internal modules
 from mfiles.errors import MFilesClientException, MFilesServerException
 
@@ -31,6 +32,8 @@ class MFilesClientBase:
         SERVER = 1
         VAULT = 2
 
+    SERVICE_NAME: str = "python-mfiles"
+
     def __init__(self, server: str, user: Optional[str], password: Optional[str], vault: Optional[str] = None):
         """
         Constructor for M-Files client.
@@ -48,12 +51,66 @@ class MFilesClientBase:
         self._user = None
         self._password = None
         self._vault = None
-        self._server_token = None
-        self._vault_token = None
+        self._server_token: Optional[str] = None
+        self._server_token_issued: Optional[datetime] = None
+        self._vault_token: Optional[str] = None
+        self._vault_token_issued: Optional[datetime] = None
         self.user = user
         self.password = password
         self.vault = vault
         self.server = server
+        self._load_tokens()
+
+    def _store_tokens(self) -> None:
+        """
+        Persist current token information
+        :return:
+        """
+        username = getlogin()
+        retrieved_token = keyring.get_password(MFilesClientBase.SERVICE_NAME, username) or "{}"
+        stored_data = json.loads(retrieved_token)
+
+        # Server token logic
+        if self.server_token:
+            if "server_token" in stored_data:
+                if (stored_data["server_token"][0] != self.server_token or
+                        stored_data["server_token"][1] != self._server_token_issued.timestamp()):
+                    stored_data["server_token"] = (self.server_token, self._server_token_issued.timestamp())
+            else:
+                stored_data["server_token"] = (self.server_token, self._server_token_issued.timestamp())
+
+        # Vault token logic
+        if "vaults" not in stored_data:
+            stored_data["vaults"] = {}
+        if self.vault and self.vault_token:
+            if self.vault in stored_data["vaults"]:
+                if (stored_data["vaults"][self.vault][0] != self.vault_token or
+                        stored_data["vaults"][self.vault][1] != self._vault_token_issued.timestamp()):
+                    stored_data["vaults"][self.vault] = (self.vault_token, self._vault_token_issued.timestamp())
+            else:
+                stored_data["vaults"][self.vault] = (self.vault_token, self._vault_token_issued.timestamp())
+
+        # Store the thing as JSON into default backend
+        retrieved_token = json.dumps(stored_data)
+        keyring.set_password(MFilesClientBase.SERVICE_NAME, username, retrieved_token)
+
+    def _load_tokens(self) -> None:
+        now = datetime.now(tz=timezone.utc)
+        username = getlogin()
+        retrieved_token = keyring.get_password(MFilesClientBase.SERVICE_NAME, username) or "{}"
+        stored_data = json.loads(retrieved_token)
+
+        # Server token logic
+        if "server_token" in stored_data and not self.server_token:
+            self._server_token = stored_data["server_token"][0]
+            self._server_token_issued = datetime.fromtimestamp(stored_data["server_token"][1], tz=timezone.utc)
+
+        # Vault token logic
+        if "vaults" not in stored_data:
+            return
+        if self.vault and self.vault in stored_data["vaults"]:
+            self._vault_token = stored_data["vaults"][self.vault][0]
+            self._vault_token_issued = datetime.fromtimestamp(stored_data["vaults"][self.vault][1], tz=timezone.utc)
 
     @property
     def server(self) -> str:
@@ -132,7 +189,8 @@ class MFilesClientBase:
     @server_token.setter
     def server_token(self, token: str) -> None:
         self._server_token = token
-        self.session.headers = {"X-Authentication": self._server_token}
+        self._server_token_issued = datetime.now(tz=timezone.utc)
+        self._store_tokens()
 
     @property
     def vault_token(self):
@@ -141,12 +199,65 @@ class MFilesClientBase:
     @vault_token.setter
     def vault_token(self, token: str) -> None:
         self._vault_token = token
-        self.session.headers = {"X-Authentication": self._vault_token}
+        self._vault_token_issued = datetime.now(tz=timezone.utc)
+        self._store_tokens()
 
     def login(self) -> MFilesClientBase:
+        if self.vault:
+            if not self.vault_token:
+                self._login_vault()
+        else:
+            if not self.server_token:
+                self._login_server()
+            self._login_first_vault()
+
+    def _login_server(self) -> MFilesClientBase:
         """
         Logs in and prepares the authentication token, ready to be used in
-        HTTP request header as authentication.
+        HTTP request header as authentication for server access.
+
+        Note: This token can NOT be used for vault access.
+        """
+        auth_payload = json.dumps(
+            {
+                "Username": self.user,
+                "Password": self.password
+            }
+        )
+        request_url = self.server + "server/authenticationtokens"
+        response = self.session.post(request_url, data=auth_payload)
+        response.raise_for_status()
+        response_json = json.loads(response.text)
+        if "Value" not in response_json:
+            raise MFilesServerException("M-Files authentication failed!")
+
+        self.server_token = response_json["Value"]
+
+        return self
+
+    def _login_first_vault(self) -> MFilesClientBase:
+        """
+        With server token, get a list of available vaults.
+        Logs in to a vault and prepares the authentication token, ready to be used in subsequent vault requests.
+        """
+
+        # No vault was known.
+        # Go get a list of vaults and use the first available one
+        vaults = self.get('server/vaults', token_type=self.TokenType.SERVER)
+        if vaults is None or len(vaults) == 0:
+            raise MFilesServerException("M-Files authentication succeeded, but you don't have access to any vaults!")
+        vault = vaults[0]
+        if "Authentication" not in vault:
+            raise MFilesServerException("M-Files authentication failed! Invalid vault listing response received.")
+        self._vault = vault["GUID"]
+        self.vault_token = vault['Authentication']
+
+        return self
+
+    def _login_vault(self) -> MFilesClientBase:
+        """
+        Logs in and prepares the authentication token, ready to be used in
+        HTTP request header as authentication for vault access.
         """
         auth_payload = json.dumps(
             {
@@ -162,21 +273,7 @@ class MFilesClientBase:
         if "Value" not in response_json:
             raise MFilesServerException("M-Files authentication failed!")
 
-        if self.vault is not None:
-            self.vault_token = response_json["Value"]
-
-            return self
-
-        # No vault was specified.
-        # Go get a list of vaults and use the first available one
-        self.server_token = response_json["Value"]
-        vaults = self.get('server/vaults', token_type=self.TokenType.SERVER)
-        if vaults is None or len(vaults) == 0:
-            raise MFilesServerException("M-Files authentication succeeded, but you don't have access to any vaults!")
-        vault = vaults[0]
-        if "Authentication" not in vault:
-            raise MFilesServerException("M-Files authentication failed! Invalid vault listing response received.")
-        self.vault_token = vault['Authentication']
+        self.vault_token = response_json["Value"]
 
         return self
 
