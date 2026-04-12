@@ -47,9 +47,7 @@ class MFilesClient(MFilesClientBase):
                         if not set it will be fetched using ``getpass()``.
         :param: vault: M-Files vault GUID to connect to.
         """
-        log.warning("In init, before parent init!")
         MFilesClientBase.__init__(self, server, user, password, vault)
-        log.info("MFiles client initialized")
 
     def quick_search(self, query: str) -> dict:
         """
