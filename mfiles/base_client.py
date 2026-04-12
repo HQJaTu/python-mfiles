@@ -1,7 +1,7 @@
 # Standard modules
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from enum import Enum
 from getpass import getpass
 from http import HTTPStatus
@@ -202,14 +202,38 @@ class MFilesClientBase:
         self._vault_token_issued = datetime.now(tz=timezone.utc)
         self._store_tokens()
 
-    def login(self) -> MFilesClientBase:
+    def is_server_token_expired(self) -> bool:
+        if not self.server_token:
+            return True
+
+        now = datetime.now(timezone.utc)
+        diff = now - self._server_token_issued
+        if diff > timedelta(minutes=30):
+            return True
+
+        return False
+
+    def is_vault_token_expired(self) -> bool:
+        if not self.vault_token:
+            return True
+
+        now = datetime.now(timezone.utc)
+        diff = now - self._vault_token_issued
+        if diff > timedelta(minutes=30):
+            return True
+
+        return False
+
+    def login(self, force_auth: bool = False) -> MFilesClientBase:
         if self.vault:
-            if not self.vault_token:
+            if force_auth or self.is_vault_token_expired():
                 self._login_vault()
         else:
-            if not self.server_token:
+            if force_auth or self.is_server_token_expired():
                 self._login_server()
             self._login_first_vault()
+
+        return self
 
     def _login_server(self) -> MFilesClientBase:
         """
@@ -307,14 +331,22 @@ class MFilesClientBase:
         Login if required token missing.
         :param: required_token_type: Token to check existence for
         """
-        if required_token_type == self.TokenType.SERVER and self.server_token is None:
-            log.warning("No server authentication token provided. Attempt logging in.")
-            self.login()
-        if required_token_type == self.TokenType.VAULT and self.vault_token is None:
+        if required_token_type == self.TokenType.SERVER:
+            if self.server_token is None:
+                log.warning("No server authentication token provided. Attempt logging in.")
+                self._login_server()
+            elif self.is_server_token_expired():
+                log.warning("Server token expired. Attempt logging in.")
+                self._login_server()
+        if required_token_type == self.TokenType.VAULT:
             if self.vault is None:
                 raise MFilesClientException("There is no vault defined! Cannot get vault token for it.")
-            log.warning("No vault authentication token provided. Attempt logging in.")
-            self.login()
+            if self.vault_token is None:
+                log.warning("No vault authentication token provided. Attempt logging in.")
+                self._login_vault()
+            elif self.is_vault_token_expired():
+                log.warning("Vault token expired. Attempt logging in.")
+                self._login_vault()
 
     def get(self, endpoint: str, token_type: TokenType = TokenType.VAULT) -> dict:
         """
@@ -383,3 +415,18 @@ class MFilesClientBase:
         if response.status_code != HTTPStatus.OK:
             raise MFilesServerException(response.text)
         return response.json()
+
+    def get_session_info(self) -> dict:
+        session = self.get('session', token_type=self.TokenType.VAULT)
+
+        return session
+
+    def get_server_status(self) -> dict:
+        status = self.get('server/status', token_type=self.TokenType.SERVER)
+
+        return status
+
+    def get_server_capabilities(self) -> dict:
+        capabilities = self.get('server/capabilities', token_type=self.TokenType.SERVER)
+
+        return capabilities
